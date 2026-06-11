@@ -100,7 +100,8 @@ func (o *objectGoReflect) _getField(jsName string) reflect.Value {
 
 func (o *objectGoReflect) _getMethod(jsName string) reflect.Value {
 	if idx, exists := o.origValueTypeInfo.Methods[jsName]; exists {
-		return o.origValue.Method(idx)
+		// reflectGetMethod is build-tag gated; see object_goreflect_methods.go.
+		return reflectGetMethod(o.origValue, idx)
 	}
 
 	return reflect.Value{}
@@ -467,28 +468,12 @@ func (r *Runtime) buildTypeInfo(t reflect.Type) (info *reflectTypeInfo) {
 		r.buildFieldInfo(t, nil, info)
 	}
 
-	info.Methods = make(map[string]int)
-	n := t.NumMethod()
-	info.MethodNames = make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		method := t.Method(i)
-		name := method.Name
-		if !ast.IsExported(name) {
-			continue
-		}
-		if r.fieldNameMapper != nil {
-			name = r.fieldNameMapper.MethodName(t, method)
-			if name == "" {
-				continue
-			}
-		}
-
-		if _, exists := info.Methods[name]; !exists {
-			info.MethodNames = append(info.MethodNames, name)
-		}
-
-		info.Methods[name] = i
-	}
+	// buildMethodInfo populates info.Methods / info.MethodNames with the type's
+	// exported methods. By default it is a no-op (object_goreflect_nomethods.go)
+	// that leaves them nil, so reflect.Type.Method is never compiled in and
+	// method-level dead-code elimination is preserved; the goja_reflect_methods
+	// build tag selects the real implementation (object_goreflect_methods.go).
+	r.buildMethodInfo(t, info)
 	return
 }
 
