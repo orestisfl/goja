@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"reflect"
+	"sort"
 )
 
 // JsonEncodable allows custom JSON encoding by JSON.stringify()
@@ -31,6 +32,7 @@ type reflectFieldInfo struct {
 type reflectTypeInfo struct {
 	Fields                  map[string]reflectFieldInfo
 	Methods                 map[string]int
+	NativeMethods           map[string]NativeMethod
 	FieldNames, MethodNames []string
 }
 
@@ -107,6 +109,21 @@ func (o *objectGoReflect) _getMethod(jsName string) reflect.Value {
 	return reflect.Value{}
 }
 
+// _getNativeMethod resolves a method registered via Runtime.RegisterNativeMethods.
+// Unlike _getMethod it never calls reflect.Value.Method, so it is safe to reach
+// under the default build without defeating method-level dead-code elimination.
+func (o *objectGoReflect) _getNativeMethod(jsName string) Value {
+	if nm := o.origValueTypeInfo.NativeMethods; nm != nil {
+		if fn, ok := nm[jsName]; ok {
+			this := o.origValue.Interface()
+			return o.val.runtime.newNativeFunc(func(call FunctionCall) Value {
+				return fn(this, call)
+			}, nil, jsName, nil, 0)
+		}
+	}
+	return nil
+}
+
 func (o *objectGoReflect) _get(name string) Value {
 	if o.value.Kind() == reflect.Struct {
 		if v := o._getField(name); v.IsValid() {
@@ -116,6 +133,10 @@ func (o *objectGoReflect) _get(name string) Value {
 
 	if v := o._getMethod(name); v.IsValid() {
 		return o.val.runtime.ToValue(v.Interface())
+	}
+
+	if m := o._getNativeMethod(name); m != nil {
+		return m
 	}
 
 	return nil
@@ -157,6 +178,13 @@ func (o *objectGoReflect) getOwnProp(name string) Value {
 	if v := o._getMethod(name); v.IsValid() {
 		return &valueProperty{
 			value:      o.val.runtime.ToValue(v.Interface()),
+			enumerable: true,
+		}
+	}
+
+	if m := o._getNativeMethod(name); m != nil {
+		return &valueProperty{
+			value:      m,
 			enumerable: true,
 		}
 	}
@@ -253,6 +281,11 @@ func (o *objectGoReflect) _has(name string) bool {
 	}
 	if v := o._getMethod(name); v.IsValid() {
 		return true
+	}
+	if nm := o.origValueTypeInfo.NativeMethods; nm != nil {
+		if _, ok := nm[name]; ok {
+			return true
+		}
 	}
 	return false
 }
@@ -474,6 +507,24 @@ func (r *Runtime) buildTypeInfo(t reflect.Type) (info *reflectTypeInfo) {
 	// method-level dead-code elimination is preserved; the goja_reflect_methods
 	// build tag selects the real implementation (object_goreflect_methods.go).
 	r.buildMethodInfo(t, info)
+
+	// Merge any embedder-registered native methods (RegisterNativeMethods). These
+	// dispatch without reflect.Value.Method, so they are available under the
+	// default build and do not defeat method-level dead-code elimination. Names
+	// already exposed reflectively (goja_reflect_methods build) are not listed
+	// twice; the rest are appended in a stable order so enumeration is
+	// deterministic.
+	if nm := r.nativeMethods[t]; nm != nil {
+		info.NativeMethods = nm
+		names := make([]string, 0, len(nm))
+		for name := range nm {
+			if _, dup := info.Methods[name]; !dup {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		info.MethodNames = append(info.MethodNames, names...)
+	}
 	return
 }
 

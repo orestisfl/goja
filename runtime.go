@@ -102,6 +102,7 @@ type Runtime struct {
 	typeInfoCache   map[reflect.Type]*reflectTypeInfo
 	fieldNameMapper FieldNameMapper
 	simpleMapTypes  map[reflect.Type]func(interface{}) map[string]interface{}
+	nativeMethods   map[reflect.Type]map[string]NativeMethod
 
 	vm *vm
 }
@@ -1411,6 +1412,39 @@ func (r *Runtime) RegisterSimpleMapType(t reflect.Type, convert func(interface{}
 		r.simpleMapTypes = map[reflect.Type]func(interface{}) map[string]interface{}{}
 	}
 	r.simpleMapTypes[t] = convert
+}
+
+// NativeMethod is a reflection-free dispatcher for a Go method exposed to
+// JavaScript via RegisterNativeMethods. this is the Go receiver: the value the
+// objectGoReflect wraps, i.e. exactly what Export() would return (for a value
+// registered as reflect.TypeOf(time.Time{}) it is a time.Time). call carries the
+// JavaScript call arguments.
+type NativeMethod func(this interface{}, call FunctionCall) Value
+
+// RegisterNativeMethods makes the named methods of values of type t callable
+// from JavaScript WITHOUT goja using reflect.Value.Method. The supplied funcs
+// are ordinary Go closures (e.g. wrapping time.Time.Unix), so the linker sees
+// normal static method calls and method-level dead-code elimination is
+// preserved. This is the DCE-friendly counterpart to the blanket, reflective
+// method exposure gated behind the goja_reflect_methods build tag (which retains
+// every exported method of every reachable type binary-wide).
+//
+// Like SetFieldNameMapper, the mapping for any given value is fixed when the
+// value is first wrapped, so register before handing values of type t to the
+// runtime. Registered methods participate in property reads, the `in` operator,
+// and enumeration just like reflectively-exposed methods. Under the
+// goja_reflect_methods build the reflective method set takes precedence; native
+// methods only add names not already present.
+func (r *Runtime) RegisterNativeMethods(t reflect.Type, methods map[string]NativeMethod) {
+	if r.nativeMethods == nil {
+		r.nativeMethods = make(map[reflect.Type]map[string]NativeMethod)
+	}
+	m := make(map[string]NativeMethod, len(methods))
+	for name, fn := range methods {
+		m[name] = fn
+	}
+	r.nativeMethods[t] = m
+	r.typeInfoCache = nil
 }
 
 // Callable represents a JavaScript function that can be called from Go.
